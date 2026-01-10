@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+### [v1.1.0] Atomic Operations (2026-01-10)
+
+- **Feat:** using atomic `BRPopLPush` for job fetching to prevent race conditions.
+- **Feat:** Implemented atomic job completion status updates.
+
 ### [v1.0.0] Worker Concurrency Handling (Minimum Version) (2026-01-03)
 
 - **Refactor:** Enhance worker concurrency handling.
