@@ -103,27 +103,24 @@ func (w *Worker) setAttemptsCount(ctx context.Context, queue string, key int, at
 	)
 }
 
-func (w *Worker) getLastIndexRead(ctx context.Context, queue string) int {
+func (w *Worker) moveFromWaitToActive(ctx context.Context, queue string) *int {
 
-	fullKey := createLastReadKey(queue)
+	fullKeyWait := fmt.Sprintf("bull:%s:wait", queue)
+	fullKeyActive := fmt.Sprintf("bull:%s:active", queue)
 
-	value, err := w.redisClient.ZRange(ctx, fullKey, 0, -1).Result()
+	value, err := w.redisClient.BRPopLPush(ctx, fullKeyWait, fullKeyActive, -1).Result()
+
+	if err != nil || value == "" {
+		return nil
+	}
+
+	integerValue, err := strconv.Atoi(value)
 
 	if err != nil {
 		fmt.Println(err)
 	}
 
-	if len(value) == 0 {
-		return 0
-	}
-
-	integerValue, err := strconv.Atoi(value[len(value)-1])
-
-	if err != nil {
-		fmt.Println(err)
-	}
-
-	return integerValue
+	return &integerValue
 }
 
 func (w *Worker) getAttemptsCount(ctx context.Context, queue string, key int, attemptType string) int {
@@ -213,56 +210,58 @@ func (w *Worker) run() {
 			return
 		default:
 
-			lastIndexRead := w.getLastIndexRead(w.ctx, w.Queue)
+			currentIndexToReadPointer := w.moveFromWaitToActive(w.ctx, w.Queue)
+			if currentIndexToReadPointer != nil {
 
-			currentIndexToRead := lastIndexRead + 1
-			key := createKey(w.Queue, strconv.Itoa(currentIndexToRead))
+				currentIndexToRead := *currentIndexToReadPointer
+				key := createKey(w.Queue, strconv.Itoa(currentIndexToRead))
 
-			jobToProcess := w.getValueByKey(w.ctx, key)
+				jobToProcess := w.getValueByKey(w.ctx, key)
 
-			if jobToProcess.IsProcessed {
-			}
+				if jobToProcess.IsProcessed {
+				}
 
-			if !jobToProcess.IsNotFound {
+				if !jobToProcess.IsNotFound {
 
-				if jobToProcess.Name != nil {
-					jobName := *jobToProcess.Name
-					jobData := *jobToProcess.Data
+					if jobToProcess.Name != nil {
+						jobName := *jobToProcess.Name
+						jobData := *jobToProcess.Data
 
-					log.Printf("Dispatching job %s of %s (jobID: %d)", jobName, w.Queue, currentIndexToRead)
+						log.Printf("Dispatching job %s of %s (jobID: %d)", jobName, w.Queue, currentIndexToRead)
 
-					handler, ok := w.Handlers[jobName]
+						handler, ok := w.Handlers[jobName]
 
-					if !ok {
-						log.Printf("No handler registered for job '%s' on queue '%s'", jobName, w.Queue)
+						if !ok {
+							log.Printf("No handler registered for job '%s' on queue '%s'", jobName, w.Queue)
+							w.setJobProcessed(w.ctx, w.Queue, currentIndexToRead)
+							continue
+						}
+
+						attemptsStartedForJob := w.getAttemptsCount(w.ctx, w.Queue, currentIndexToRead, "ats")
+						attemptsStartedForJob++
+						w.setAttemptsCount(w.ctx, w.Queue, currentIndexToRead, attemptsStartedForJob, "ats")
+
+						var data map[string]any
+						if err := json.Unmarshal([]byte(jobData), &data); err != nil {
+							continue
+						}
+
 						w.setJobProcessed(w.ctx, w.Queue, currentIndexToRead)
-						continue
+
+						returnValue, err := handler(w.ctx, data)
+
+						if err != nil {
+							fmt.Println(err)
+						}
+
+						finishedOn := time.Now().UnixMilli()
+						w.setJobFinished(w.ctx, w.Queue, currentIndexToRead, finishedOn, returnValue)
+						w.addToJobCompletedQueue(w.ctx, w.Queue, currentIndexToRead, finishedOn)
+
+						attemptsMadeForJob := w.getAttemptsCount(w.ctx, w.Queue, currentIndexToRead, "atm")
+						attemptsMadeForJob++
+						w.setAttemptsCount(w.ctx, w.Queue, currentIndexToRead, attemptsMadeForJob, "atm")
 					}
-
-					attemptsStartedForJob := w.getAttemptsCount(w.ctx, w.Queue, currentIndexToRead, "ats")
-					attemptsStartedForJob++
-					w.setAttemptsCount(w.ctx, w.Queue, currentIndexToRead, attemptsStartedForJob, "ats")
-
-					var data map[string]any
-					if err := json.Unmarshal([]byte(jobData), &data); err != nil {
-						continue
-					}
-
-					w.setJobProcessed(w.ctx, w.Queue, currentIndexToRead)
-
-					returnValue, err := handler(w.ctx, data)
-
-					if err != nil {
-						fmt.Println(err)
-					}
-
-					finishedOn := time.Now().UnixMilli()
-					w.setJobFinished(w.ctx, w.Queue, currentIndexToRead, finishedOn, returnValue)
-					w.addToJobCompletedQueue(w.ctx, w.Queue, currentIndexToRead, finishedOn)
-
-					attemptsMadeForJob := w.getAttemptsCount(w.ctx, w.Queue, currentIndexToRead, "atm")
-					attemptsMadeForJob++
-					w.setAttemptsCount(w.ctx, w.Queue, currentIndexToRead, attemptsMadeForJob, "atm")
 				}
 			}
 		}
