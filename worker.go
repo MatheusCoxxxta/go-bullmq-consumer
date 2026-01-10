@@ -147,9 +147,17 @@ func (w *Worker) getAttemptsCount(ctx context.Context, queue string, key int, at
 }
 
 func (w *Worker) addToJobCompletedQueue(ctx context.Context, queue string, key int, finishedOn int64) {
-	fullKeyJob := fmt.Sprintf("bull:%s:completed", queue)
 
-	w.redisClient.ZAdd(ctx, fullKeyJob, redis.Z{
+	fullKeyActive := fmt.Sprintf("bull:%s:active", queue)
+	fullKeyCompleted := fmt.Sprintf("bull:%s:completed", queue)
+
+	value, err := w.redisClient.BRPopLPush(ctx, fullKeyActive, fullKeyCompleted, -1).Result()
+
+	if err != nil || value == "" {
+		return
+	}
+
+	w.redisClient.ZAdd(ctx, fullKeyCompleted, redis.Z{
 		Score:  float64(finishedOn),
 		Member: key,
 	})
